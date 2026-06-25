@@ -1,3 +1,4 @@
+
 """
 Controlling-job resolution — Part 2 of the build test.
  
@@ -365,8 +366,9 @@ def _resolve(
     # --- 6. Conflict detection: occupancy mismatches in the historical record
     # The 2009 BIS A1 on 310 W 144 St claimed existing_occupancy=J-2 while the
     # only CO at the time (CO 980, 1918) certified garage use. Surface this
-    # explicitly because Kunal called out that "nothing says supersedes" and
-    # this is the kind of data conflict a serious resolver should flag.
+    # explicitly because nothing in the source data says "this supersedes that"
+    # — and unresolved contradictions like this must be flagged rather than
+    # silently swallowed by the resolver.
     conflicts = conn.execute(
         """SELECT filing_id, job_number, existing_occupancy, pre_filing_date
            FROM filing
