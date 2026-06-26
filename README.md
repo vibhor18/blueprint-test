@@ -54,12 +54,7 @@ filings from the two systems never collide. Status values are mapped to a
 canonical set (APPROVED, DISAPPROVED, WITHDRAWN, PERMIT_ISSUED, CO_ISSUED,
 LOC_ISSUED, IN_PROCESS, OTHER) and DOB NOW CO filing types are normalized
 (`Initial` → TEMPORARY, `Renewal Without Change` → RENEWAL, `Final` → FINAL,
-paper → LEGACY_PAPER). Every BIN lives in its own `data/<BIN>/` directory with
-a `property.json` and any of the optional source files (`bis_jobs.json`,
-`dobnow_jobs.json`, `dobnow_cos.json`, `bis_portal_notes.md`, `legacy_co.json`,
-`interim_use.json`, drawing PDFs). The ingester walks every directory that has
-a `property.json` and applies the same extractors to whatever it finds, so
-adding a third building is dropping a directory — no code change required.
+paper → LEGACY_PAPER). Every BIN lives in its own `data/<BIN>/` directory containing the Socrata pulls (`bis_jobs.json`, `dobnow_jobs.json`, `dobnow_cos.json`), the BIS portal scrape (`bis_portal_notes.md`), and any drawing PDFs. Building identity (BBL, borough, block, lot, address) is seeded directly from the Socrata data already present in each directory. Adding a third building requires dropping a directory with the relevant pulls the property row is derived from data already being ingested, no separate identity file needed.
 
 **Part 2 — Controlling-job resolution.** `blueprint/controlling_job.py`. Given a
 (BIN, floor, as-of-date), the resolver returns the CO that governs that floor
@@ -413,13 +408,10 @@ blueprint/
   extraction.py       Six-bucket target-field-list renderer
   cli.py              Part 4 CLI: ask, resolve, coverage, extract
 data/
-  <BIN>/property.json           Required per BIN
-  <BIN>/bis_jobs.json           Optional, Socrata pull
-  <BIN>/dobnow_jobs.json        Optional, Socrata pull
-  <BIN>/dobnow_cos.json         Optional, Socrata pull
-  <BIN>/bis_portal_notes.md     Optional, HTML scrape
-  <BIN>/legacy_co.json          Optional, pre-DOB NOW paper CO sidecar
-  <BIN>/interim_use.json        Optional, LNOs and other non-CO use records
+  <BIN>/bis_jobs.json           Socrata pull (BIS-era filings)
+  <BIN>/dobnow_jobs.json        Socrata pull (DOB NOW filings + seeds property identity)
+  <BIN>/dobnow_cos.json         Socrata pull (DOB NOW COs)
+  <BIN>/bis_portal_notes.md     HTML scrape (property profile + ledger)
   <BIN>/*.pdf                   Drawing sets — processed by sheets.py
 corpus.db                       Generated, gitignored
 requirements.txt                pypdf
