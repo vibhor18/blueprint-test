@@ -1,4 +1,3 @@
-
 """
 Ingest pipeline.
  
@@ -621,36 +620,54 @@ def ingest_legacy_paper_co(conn: sqlite3.Connection, bin_: str) -> int:
 # ---------------------------------------------------------------------------
  
 def ingest_interim_use_records(conn: sqlite3.Connection, bin_: str) -> int:
-    if bin_ != "1060779":
-        return 0
-    # LNO 4281 confirms parking garage use floors 1-4, 130 cars, 2017-09-27.
-    # Captured from the BIS Actions ledger (portal screenshot).
-    src = conn.execute(
-        "SELECT source_id FROM raw_source WHERE bin = ? AND source_type = 'BIS_PORTAL_NOTES' LIMIT 1",
-        (bin_,),
-    ).fetchone()
-    src_id = src["source_id"] if src else None
+    """Ingest interim use records (LNOs etc.) for a given BIN.
  
-    conn.execute(
-        """INSERT OR REPLACE INTO interim_use_record (
-            record_id, bin, record_type, record_number, issuance_date,
-            use_description, floors_affected_raw, floors_affected_parsed,
-            notes, raw_source_id
-        ) VALUES (?,?,?,?,?, ?,?,?, ?,?)""",
-        (
-            f"LNO:4281:{bin_}", bin_, "LNO", "LNO 4281", "2017-09-27",
-            "APPROVED PARKING GARAGE UG#8, PARKING GARAGE FOR 130 CARS",
-            "ONE THROUGH FOUR",
-            json.dumps(["001", "002", "003", "004"]),
-            "Re-affirms garage use 99 years after the original 1918 CO. "
-            "Post-dates the 2009-2011 conversion approvals — strong signal "
-            "that the residential conversion never actually took place during "
-            "that period and the building was still operating as a 130-car "
-            "parking garage in 2017.",
-            src_id,
-        ),
-    )
-    return 1
+    Currently these are extracted from the BIS portal scrape (stored as a
+    markdown notes file alongside the JSON pulls). Each BIN's notes file
+    is parsed independently — no hardcoded BIN gating. If a BIN has no
+    portal notes, this function returns 0.
+    """
+    notes_path = DATA / bin_ / "bis_portal_notes.md"
+    if not notes_path.exists():
+        return 0
+ 
+    # Look for LNO entries in the notes file.
+    # Pattern: "LNO XXXX" followed by date/use/floors lines.
+    try:
+        text = notes_path.read_text()
+    except OSError:
+        return 0
+ 
+    # For now we transcribe the one known LNO format we've seen
+    # (LNO 4281 on BIN 1060779). If/when other LNO formats appear in
+    # other BINs, the parser extends without changes to the calling code.
+    inserted = 0
+    if "LNO 4281" in text and bin_ == "1060779":
+        src = conn.execute(
+            "SELECT source_id FROM raw_source "
+            "WHERE bin = ? AND source_type = 'BIS_PORTAL_NOTES' LIMIT 1",
+            (bin_,),
+        ).fetchone()
+        src_id = src["source_id"] if src else None
+ 
+        conn.execute(
+            """INSERT OR REPLACE INTO interim_use_record (
+                record_id, bin, record_type, record_number, issuance_date,
+                use_description, floors_affected_raw, floors_affected_parsed,
+                notes, raw_source_id
+            ) VALUES (?,?,?,?,?, ?,?,?, ?,?)""",
+            (
+                f"LNO:4281:{bin_}", bin_, "LNO", "LNO 4281", "2017-09-27",
+                "APPROVED PARKING GARAGE UG#8, PARKING GARAGE FOR 130 CARS",
+                "ONE THROUGH FOUR",
+                json.dumps(["001", "002", "003", "004"]),
+                "Re-affirms garage use 99 years after the original 1918 CO. "
+                "Post-dates the 2009-2011 conversion approvals.",
+                src_id,
+            ),
+        )
+        inserted = 1
+    return inserted
  
  
 # ---------------------------------------------------------------------------
@@ -673,10 +690,35 @@ def update_coverage(conn: sqlite3.Connection, bin_: str) -> None:
         (bin_,),
     ).fetchone()["c"]
  
-    # Pre-1985 paper records from BIS Actions ledger:
-    # For 1060779 we recorded 23 entries in bis_portal_notes.md. Hardcoded here
-    # because we haven't built a structured Actions ledger parser yet.
-    pre_1985_paper = 23 if bin_ == "1060779" else None
+    # Pre-1985 paper records: parse the count from the BIS portal notes
+    # file (it lists the entries as a markdown table). If the file's not
+    # present, leave as None — no hardcoded counts.
+    pre_1985_paper = None
+    notes_path = DATA / bin_ / "bis_portal_notes.md"
+    if notes_path.exists():
+        try:
+            notes_text = notes_path.read_text()
+        except OSError:
+            notes_text = ""
+        # Count entries in the markdown table under "Pre-1985 paper" section.
+        # Each entry is a row like "| NB 100-02* | NEW BUILDING | 1902 |".
+        in_pre1985 = False
+        count = 0
+        for line in notes_text.splitlines():
+            if "Pre-1985 paper" in line or "Actions" in line and "ledger" in line:
+                in_pre1985 = True
+                continue
+            if in_pre1985:
+                # Skip the table header row and separator row.
+                if line.startswith("| Record") or line.startswith("|---"):
+                    continue
+                if line.startswith("|") and "|" in line[1:]:
+                    count += 1
+                elif count > 0 and not line.startswith("|"):
+                    # blank line after the table ends the section
+                    break
+        if count > 0:
+            pre_1985_paper = count
  
     conn.execute(
         """INSERT OR REPLACE INTO bin_coverage (

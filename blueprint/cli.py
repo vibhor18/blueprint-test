@@ -1,4 +1,3 @@
-
 """
 Thin CLI — Part 4 of the build test.
  
@@ -37,6 +36,7 @@ from blueprint.controlling_job import (
     format_resolution,
     resolve_controlling_job,
 )
+from blueprint.extraction import extract, format_extraction
  
  
 ROOT = Path(__file__).resolve().parent.parent
@@ -269,6 +269,21 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0
  
  
+def cmd_extract(args: argparse.Namespace) -> int:
+    """Render the six-bucket target-field-list extraction for (bin, job).
+ 
+    The assignment specifies six buckets of fields a useful extraction
+    should produce — pull what's present, flag what isn't. This command
+    walks those buckets, pulls corpus values where they exist, and
+    explicitly marks 'not on sheet' where the field isn't recorded."""
+    e = extract(args.bin, args.job)
+    if args.json:
+        print(json.dumps(e.to_dict(), indent=2, default=str))
+    else:
+        print(format_extraction(e))
+    return 0
+ 
+ 
 def cmd_list_questions(args: argparse.Namespace) -> int:
     print("Available demo questions:")
     print()
@@ -296,6 +311,7 @@ Examples:
   python -m blueprint.cli ask q1 q2 --json          # JSON output
   python -m blueprint.cli resolve --bin 1060779 --floor 003 --as-of 2026-06-24
   python -m blueprint.cli coverage --bin 1060779
+  python -m blueprint.cli extract --bin 1011231 --job 140941514
   python -m blueprint.cli list-questions
 """,
     )
@@ -321,6 +337,16 @@ Examples:
     p_cov = sub.add_parser("coverage", help="What's in the corpus for a BIN.")
     p_cov.add_argument("--bin", required=True)
     p_cov.set_defaults(func=cmd_coverage)
+ 
+    p_ext = sub.add_parser(
+        "extract",
+        help="Six-bucket target-field-list extraction for a (BIN, job).",
+    )
+    p_ext.add_argument("--bin", required=True)
+    p_ext.add_argument("--job", required=True,
+                       help="DOB job number, e.g. 140941514.")
+    p_ext.add_argument("--json", action="store_true")
+    p_ext.set_defaults(func=cmd_extract)
  
     p_lq = sub.add_parser("list-questions",
                           help="Show the canned demo questions and their rationale.")

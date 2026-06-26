@@ -1,4 +1,3 @@
-
 """
 Blueprint corpus schema — SQLite.
  
@@ -223,6 +222,11 @@ CREATE TABLE IF NOT EXISTS sheet (
     source_format               TEXT,                -- 'BORN_DIGITAL' | 'SCANNED_UPLOAD' | 'MICROFILM'
     legibility_score            TEXT,                -- 'HIGH' | 'MEDIUM' | 'LOW'
     legibility_notes            TEXT,
+    professional_certifier      TEXT,                -- e.g. 'QWA Studio' if Prof. Cert. used.
+                                                     --   Distinct from architect_of_record:
+                                                     --   the AOR signs the drawings; the
+                                                     --   certifier signs the audit-acceptance.
+    professional_certifier_date TEXT,                -- ISO date of certification
     is_canonical                INTEGER,             -- NULL = unresolved
     canonical_reasoning         TEXT,
     raw_source_id               INTEGER REFERENCES raw_source(source_id)
