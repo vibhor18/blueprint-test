@@ -1,4 +1,3 @@
-
 """
 Generic extractors that run on any DOB-style drawing PDF.
  
@@ -45,7 +44,7 @@ except ImportError:
 TITLE_BLOCK_PATTERNS: dict[str, re.Pattern] = {
     # Core anchor identifiers
     "scan_code":       re.compile(r"\b(ES\d{9})\b"),
-    "job_number":      re.compile(r"(\d{9})\s*\n*\s*DEPT\s+OF\s+BLDGS", re.IGNORECASE),
+    "job_number":      re.compile(r"(\d{9})\s*\n+\s*(?:ES\d{9})\s*\n+\s*DEPT\s+OF\s+BLDGS", re.IGNORECASE),
  
     # Sheet identity
     "sheet_number":    re.compile(r"^\s*([A-Z]{1,3})-?\s*(\d{3}\.\d{2})\s*$", re.MULTILINE),
@@ -464,4 +463,4 @@ def extract_page(pdf_path: Path, page_number: int) -> dict[str, Any]:
         "findings": findings,
         "raw_text_length": len(text),
     }
- 
+  

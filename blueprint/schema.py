@@ -281,6 +281,25 @@ CREATE TABLE IF NOT EXISTS finding (
 );
  
  
+ 
+-- Amendment diffs: firm or certifier changes detected across sheets
+-- belonging to the same job. One row per detected change event.
+-- The temporal sequence is the value: who held the role at filing,
+-- who holds it at audit-acceptance, and when each event occurred.
+CREATE TABLE IF NOT EXISTS filing_amendment_diff (
+    diff_id             TEXT PRIMARY KEY,
+    bin                 TEXT NOT NULL REFERENCES property(bin),
+    job_number          TEXT NOT NULL,
+    field_name          TEXT NOT NULL,
+    prior_value         TEXT,
+    new_value           TEXT NOT NULL,
+    prior_date          TEXT,
+    new_date            TEXT NOT NULL,
+    change_type         TEXT,
+    notes               TEXT,
+    raw_source_id       INTEGER REFERENCES raw_source(source_id)
+);
+ 
 -- -----------------------------------------------------------------------
 -- Coverage: what we have and what we know is missing.
 -- -----------------------------------------------------------------------

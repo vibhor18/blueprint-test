@@ -1,4 +1,3 @@
-
 """
 Sheet structuring — Part 3.
  
@@ -95,6 +94,7 @@ def _clear_sheet_data_for_bin(conn: sqlite3.Connection, bin_: str) -> None:
         "DELETE FROM raw_source WHERE bin = ? AND source_type = 'DOB_DRAWING_PDF'",
         (bin_,),
     )
+    conn.execute("DELETE FROM filing_amendment_diff WHERE bin = ?", (bin_,))
  
  
 # ---------------------------------------------------------------------------
@@ -116,6 +116,7 @@ def ingest_sheets(db_path: Path = DB_PATH,
         "sheets": 0,
         "regions": 0,
         "findings": 0,
+        "diffs": 0,
         "per_pdf": [],
     }
  
@@ -146,12 +147,6 @@ def ingest_sheets(db_path: Path = DB_PATH,
             num_pages = pdf_meta.get("num_pages") or 0
  
             # Skip PDFs that don't look like DOB approved drawing sheets.
-            # The signature for a DOB drawing is: at least one page contains
-            # both a scan code (ESxxxxxxxxx) and the text "DEPT OF BLDGS",
-            # OR a sheet-number pattern. PDFs without either signal are
-            # likely other artifacts (paper-CO scans, expedited filings,
-            # supporting docs) and the drawing-specific extractor would
-            # produce mostly empty rows on them.
             from blueprint.extractors import read_page_text
             import re as _re
             looks_like_drawing = False
@@ -193,16 +188,10 @@ def ingest_sheets(db_path: Path = DB_PATH,
                 regions = result["regions"]
                 findings_for_page = result["findings"]
  
-                # Sheet row
                 sheet_number = tb.get("sheet_number") or f"page-{page_num}"
-                # The job_number value here is what the title block claims; we
-                # also fall back to the path stem if needed.
                 job_in_tb = tb.get("job_number")
-                drawing_title = None  # title block doesn't expose this as a
-                                     # clean text run; would need positional
-                                     # parsing. Honest leave-as-None.
+                drawing_title = None
  
-                # Architect of record from firms_detected
                 firms = tb.get("firms_detected", [])
                 aor = next((f["name"] for f in firms
                             if f["role"] == "architect_of_record"), None)
@@ -210,7 +199,6 @@ def ingest_sheets(db_path: Path = DB_PATH,
                              if f["role"] == "professional_certifier"), None)
                 cert_name = cert["name"] if cert else None
                 cert_date = tb.get("audit_date") if cert else None
-                # Convert MM/DD/YYYY → ISO
                 cert_date_iso = None
                 if cert_date:
                     try:
@@ -219,10 +207,8 @@ def ingest_sheets(db_path: Path = DB_PATH,
                     except ValueError:
                         cert_date_iso = cert_date
  
-                # scale: take the first detected scale pattern if any
                 scale = tb.get("scale_pattern")
  
-                # Filing link (if a filing record exists for this job + BIN)
                 filing_id = None
                 if job_in_tb:
                     filing_row = conn.execute(
@@ -257,7 +243,7 @@ def ingest_sheets(db_path: Path = DB_PATH,
                         pdf_meta.get("modification_date"),
                         pdf_meta.get("producer"),
                         pdf_meta.get("embedded_title"),
-                        "BORN_DIGITAL"  # default; vision/OCR layer would re-assess
+                        "BORN_DIGITAL"
                             if pdf_meta.get("producer") else None,
                         "HIGH" if pdf_meta.get("producer") else None,
                         cert_name, cert_date_iso,
@@ -267,8 +253,6 @@ def ingest_sheets(db_path: Path = DB_PATH,
                 pdf_summary["sheets"] += 1
                 summary["sheets"] += 1
  
-                # Persist the title_block field bundle as a region so the
-                # bucket-report renderer can find it.
                 tb_region_id = f"{sheet_id}:r000:title_block"
                 conn.execute(
                     """INSERT OR REPLACE INTO sheet_region (
@@ -278,7 +262,7 @@ def ingest_sheets(db_path: Path = DB_PATH,
                     ) VALUES (?,?,?,?, ?,?,?, ?,?)""",
                     (
                         tb_region_id, sheet_id, "title_block",
-                        f"Title block (extracted via pypdf text + regex)",
+                        "Title block (extracted via pypdf text + regex)",
                         None, None,
                         json.dumps(tb, default=str),
                         "PDF_TEXT_REGEX", "HIGH",
@@ -287,8 +271,6 @@ def ingest_sheets(db_path: Path = DB_PATH,
                 pdf_summary["regions"] += 1
                 summary["regions"] += 1
  
-                # Persist each detected region with its marker text and
-                # text-stream position as a proxy for ordering.
                 for idx, r in enumerate(regions, start=1):
                     region_id = f"{sheet_id}:r{idx:03d}:{r['region_type']}"
                     region_label = _label_for_region(
@@ -310,10 +292,6 @@ def ingest_sheets(db_path: Path = DB_PATH,
                     pdf_summary["regions"] += 1
                     summary["regions"] += 1
  
-                # Persist findings (pinned to the title_block region by default,
-                # since the pattern extractor returns sheet-level findings
-                # without per-region attribution; a more sophisticated future
-                # extractor would attribute findings to specific regions).
                 for fidx, f in enumerate(findings_for_page):
                     finding_id = f"{sheet_id}:f{fidx:03d}"
                     conn.execute(
@@ -332,6 +310,105 @@ def ingest_sheets(db_path: Path = DB_PATH,
                     summary["findings"] += 1
  
             summary["per_pdf"].append(pdf_summary)
+ 
+            # --- Amendment diff detection ---------------------------------
+            # After all pages in this PDF are processed, compare the filing
+            # firms (candidate_aor_or_design_firm) against the professional
+            # certifier. If the certifier differs from the filing firms AND
+            # the PDF creation date predates the certification date, write
+            # a diff row capturing the temporal change event.
+            #
+            # This is what the brief meant by "watch for changes across
+            # amendments." 96 Perry: filed 2020 by AR-Tech + JD Design,
+            # audit-accepted 2025 by QWA Studio — same job, different
+            # professional accountability chain, five-year gap.
+            all_sheets_in_pdf = conn.execute(
+                """SELECT sheet_id, professional_certifier,
+                          professional_certifier_date, pdf_creation_date,
+                          raw_source_id
+                   FROM sheet WHERE bin = ? AND pdf_path = ?
+                   ORDER BY pdf_page_number ASC""",
+                (bin_, str(pdf_path)),
+            ).fetchall()
+ 
+            if all_sheets_in_pdf:
+                certifier_name = None
+                certifier_date = None
+                creation_date = None
+                filing_firms: list[str] = []
+                inferred_job_num = None
+                src_id_for_diff = all_sheets_in_pdf[0]["raw_source_id"]
+ 
+                for s in all_sheets_in_pdf:
+                    if s["professional_certifier"] and not certifier_name:
+                        certifier_name = s["professional_certifier"]
+                        certifier_date = s["professional_certifier_date"]
+                    if s["pdf_creation_date"] and not creation_date:
+                        creation_date = s["pdf_creation_date"]
+ 
+                    tb_row = conn.execute(
+                        "SELECT extracted_fields FROM sheet_region "
+                        "WHERE region_type = 'title_block' AND sheet_id = ? LIMIT 1",
+                        (s["sheet_id"],),
+                    ).fetchone()
+                    if tb_row:
+                        try:
+                            tb = json.loads(tb_row["extracted_fields"] or "{}")
+                            if not inferred_job_num:
+                                inferred_job_num = str(tb.get("job_number") or "")
+                            for firm in tb.get("firms_detected", []):
+                                if (firm["role"] == "candidate_aor_or_design_firm"
+                                        and firm["name"] not in filing_firms):
+                                    filing_firms.append(firm["name"])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+ 
+                # Prefer job number from filing table if linked
+                linked = conn.execute(
+                    "SELECT job_number FROM filing WHERE filing_id = "
+                    "(SELECT filing_id FROM sheet WHERE bin = ? "
+                    " AND pdf_path = ? AND filing_id IS NOT NULL LIMIT 1)",
+                    (bin_, str(pdf_path)),
+                ).fetchone()
+                job_num_for_diff = (
+                    linked["job_number"] if linked
+                    else inferred_job_num or None
+                )
+ 
+                if (job_num_for_diff
+                        and certifier_name
+                        and filing_firms
+                        and certifier_name not in filing_firms
+                        and certifier_date
+                        and creation_date
+                        and certifier_date > creation_date):
+                    diff_id = f"{bin_}:{job_num_for_diff}:certifier_vs_filing_firms"
+                    conn.execute(
+                        """INSERT OR REPLACE INTO filing_amendment_diff (
+                            diff_id, bin, job_number, field_name,
+                            prior_value, new_value,
+                            prior_date, new_date,
+                            change_type, notes, raw_source_id
+                        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?)""",
+                        (
+                            diff_id, bin_, job_num_for_diff,
+                            "professional_certifier",
+                            "; ".join(filing_firms),
+                            certifier_name,
+                            creation_date,
+                            certifier_date,
+                            "CERTIFIER_DIFFERS_FROM_FILING_FIRMS",
+                            "Filing firms at PDF creation date differ from "
+                            "professional certifier at audit acceptance. "
+                            "Temporal sequence: filed by "
+                            + "; ".join(filing_firms)
+                            + f" ({creation_date})"
+                            + f", audit-accepted by {certifier_name}"
+                            + f" ({certifier_date}).",
+                            src_id_for_diff,
+                        ),
+                    )
+                    summary["diffs"] += 1
  
     # Update bin_coverage for any BIN that now has sheets
     for bin_dir in bin_dirs:
@@ -369,6 +446,7 @@ def _print_summary(s: dict[str, Any]) -> None:
     print(f"Sheets ingested  : {s['sheets']}")
     print(f"Regions detected : {s['regions']}")
     print(f"Findings extracted: {s['findings']}")
+    print(f"Amendment diffs  : {s['diffs']}")
     print()
     print("Per-PDF breakdown:")
     for p in s["per_pdf"]:
